@@ -1,0 +1,1000 @@
+---
+title: "MiDAS 3: an ecosystem-specific reference database, taxonomy and knowledge platform for activated sludge and anaerobic digesters reveals species-level microbiome composition of activated sludge"
+author: "Marta Nierychlo"
+date: "15-05-2020"
+output: html_document
+---
+## R-packages
+```{r, eval=FALSE, memssage=FALSE, warning=FALSE, include=FALSE}
+install.packages("remotes")
+remotes::install_github("MadsAlbertsen/ampvis2")
+library(ampvis2)
+library(openxlsx)
+library (reshape2)
+library (dplyr)
+library(dunn.test)
+library(data.table)
+```
+
+## Load data
+```{r, eval=FALSE, message=FALSE, warning=FALSE, include=FALSE}
+#ASV table and tax
+usearch_otutable <- amp_import_usearch(otutab = "ASVtable.tsv",
+                                       sintax = "ASVs.R1.midas37.sintax")
+
+###For Figure S1b, please load the SILVA132 sintax file
+rm(list = ls())
+usearch_otutable <- amp_import_usearch(otutab = "ASVtable.tsv", 
+                                       sintax = "V13ASV_vs_SILVA_132_SSURef_Nr99_v2.sintax")
+
+#metadata
+metadata <- openxlsx::read.xlsx("MiDAS_metadata.xlsx", detectDates = TRUE)
+
+#merge data
+d <- amp_load(usearch_otutable, metadata)
+
+```
+
+#subset 20 WWTPs
+```{r}
+#20 plants with minimum 17 samples are subset
+d20 <- amp_subset_samples(d, Plant %in% c( "Bjergmarken", "Egå", "Hjørring", "Skive", "Aalborg E", "Ejby Mølle", "Aalborg W", "Esbjerg E", "Fredericia", "Esbjerg W", "Viborg", "Ribe", "Haderslev", "Odense NE", "Randers", "Odense NW", "Hirtshals", "Boeslum", "Avedøre", "Ringkøbing"))
+
+```
+
+#read qc
+```{r read qc}
+stats_d <- amp_alphadiv(data = d20)
+
+#reads per sample
+ggplot(data = stats_d, aes(x = Sample, y = Reads)) +
+  geom_point() +
+  theme(axis.text = element_text(angle = 90)) +
+  facet_wrap(~Plant, ncol = 5, scales = "free_x") +
+  ylab("Number of reads") +
+  xlab("SeqID") + ylim(0, 100000)
+
+#read histogram
+ggplot(data = stats_d, aes(x = Reads)) +
+  geom_histogram(binwidth = 1000) +
+  scale_x_continuous(limits = c(0,650000),
+                     breaks = seq(from = 0, to = 650000, by = 10000)) +
+    theme(axis.text = element_text(angle = 45, vjust = 1, hjust = 1))
+
+```
+
+#subset and normalize data 
+```{r data subset}
+d20m <- amp_subset_samples(d20, minreads = 13500)
+dn <- amp_subset_samples(d20m, normalise = TRUE)
+
+#check no of samples/plant
+nplants <- group_by(dn$metadata, Plant) %>%
+           summarise(Total = n())%>%
+           arrange(desc(Total))
+nplants
+
+#check number of unique genera and species
+uni_g <- unique(dn$tax$Genus)
+uni_s <- unique(dn$tax$Species)
+
+```
+
+
+#Figure 2
+```{r alpha diversity}
+#prepare rarefied dataset for diversity analysis
+dr <- amp_subset_samples(d20m, rarefy = 13500, normalise = TRUE)
+dr2 <- amp_subset_samples(d20m, rarefy = 13500)
+
+#calculate alpha diversity indices
+alfa <-amp_alphadiv(dr2)
+
+#calculate Simpson Index of Diversity (1-D)
+alfa[,"SIoD"] <- 0
+alfa[,"SIoD"] <- as.numeric(paste(1-alfa$Simpson))
+
+#Simpson Index of Diversity (1-D)
+ggplot(data = alfa, aes(x = Plant, y = c(SIoD), fill = Design)) +
+  geom_boxplot() +
+  xlab("") +
+  scale_y_continuous("Simpson Index of Diversity (1-D)", limits = c(0, 0.1), breaks = c(0, 0.05, 0.1)) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10, colour = "black", face = "bold"), 
+        axis.text.x = element_text(size = 10, colour = "black", vjust = 1, hjust = 1, angle = 45),
+        legend.title = element_blank())
+  
+ggsave(filename = paste0("Figure 2.pdf"), width = 8, height = 4, dpi = 300)
+
+```
+
+
+#Figure 3a
+```{r PCoA unweighed UniFrac}
+#load unweighed UniFrac distance matrix
+unifrac_un <- read.delim(file = "C:/Users/LAB-PC/Desktop/MiDAS 3.1 paper/MiDAS 3.5_2/unifrac/unweighted_unifrac_otutable_13500.txt", check.names = FALSE, header = T, stringsAsFactors = F, row.names = 1)
+
+#metadata has more samples than the UniFrac matrix, only keep those in unifrac
+metadata_un <- metadata[which(metadata[,1] %in% rownames(unifrac_un)),]
+
+#load dataset
+d_unifrac_un <- amp_load(usearch_otutable, metadata_un)
+
+#overwrite abundance data with distance matrix
+d_unifrac_un$abund <- unifrac_un
+
+#data$abund must be of class "dist" if distmeasure = "none" when performing PCoA. 
+d_unifrac_un$abund <- as.dist(unifrac_un)
+
+#plot
+beta_PCoA_un_uni <- amp_ordinate(d_unifrac_un,
+             type = "PCoA",
+             sample_color_by = "Plant",
+             sample_point_size = 3,
+             filter_species = 0,
+             transform = "none",
+             distmeasure = "none",
+             sample_colorframe = TRUE,
+             sample_colorframe_label = "Plant"
+ ) 
+
+ggsave(filename = paste0("Figure 3a.png"), plot = beta_PCoA_un_uni, width = 6, height = 5, dpi = 300)
+
+```
+
+#Figure 3b
+```{r unweighed UniFrac distance plot}
+#convert UniFrac distance matrix to data frame
+df <- melt(as.matrix(unifrac_un), varnames = c("Plant1", "Plant2"))
+df$Plant1 <- as.character(df$Plant1)
+df$Plant2 <- as.character(df$Plant2)
+
+#bind Plant names to Sample names
+df2 <- metadata_un[,c("Sample", "Plant")]
+dfb <- merge.data.frame(df, df2, by.x ="Plant1", by.y = "Sample", all.x = TRUE)
+dfm <- merge.data.frame(dfb, df2, by.x ="Plant2", by.y = "Sample", all.x = TRUE)
+
+#subset rows with distances measured within the plants
+dfm2 <- dfm[(dfm$Plant.x == dfm$Plant.y),]
+dfm2 <- dfm2[(dfm2$value != 0),]
+dfm2[,"type"] <- "within WWTP"
+
+#subset rows with distances measured between the plants
+dfm3 <- dfm[(dfm$Plant.x != dfm$Plant.y),]
+dfm3[,"type"] <- "between WWTPs"
+
+unifrac_un_sorted <- rbind(dfm2, dfm3)
+unifrac_un_sorted$type <- factor(unifrac_un_sorted$type,
+    levels = c('within WWTP','between WWTPs'), ordered = TRUE)
+
+#plot
+p1 <- ggplot(unifrac_un_sorted, aes(x=Plant.y, y=value, fill = type)) + 
+  geom_boxplot(outlier.size = 0.3) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 9, colour = "grey30", face = "plain"),
+        axis.text.x = element_text(size = 9, colour = "grey30", vjust = 1, hjust = 1, angle = 45),
+        legend.position = "top", legend.title = element_blank()) +
+  xlab("") + 
+  ylab("UniFrac distance") +
+  scale_fill_manual( values = c("#F8766D", "#00BFC4"))
+
+ggsave(filename = paste0("Figure 3b.png"),  plot = p1, width = 5, height = 3.5, dpi = 300)
+
+```
+
+#Figure 3c
+```{r unweighed UniFrac p-value matrix}
+#Dunn's test
+dunn <- as.data.frame(dunn.test(x= dfm2[,"value"], g=dfm2[,"Plant.x"],  method = 'bonferroni', altp = TRUE))
+
+setDT(dunn)[, paste0("Plant", 1:2) := tstrsplit(comparisons, " - ")]
+
+#add p value column with 2 digits notation
+dunn[,'altP.adjusted2']=round(dunn[,'altP.adjusted'],2)
+
+#plot
+d_plot <- ggplot(data = dunn, aes(x=Plant1, y=Plant2, fill=altP.adjusted)) + 
+  geom_tile(color = "grey") +
+  scale_fill_gradient2(low = "red", high = "#fc8d59", mid = "#333ede", 
+   midpoint = 0, limit = c(0,0.05), space = "Lab", na.value = "grey", 
+   name="Dunn's \np value", breaks = c(0, 0.01, 0.05)) +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+       legend.title = element_text(size = 9)) +
+  coord_fixed() +
+  xlab("") +
+  ylab("") +
+  geom_text(aes(Plant2, Plant1, label = altP.adjusted2), color = "black", size = 2.3) 
+
+ggsave(filename = paste0("Figure 3c.png"),  plot = d_plot, width = 5.5, height = 5.5, dpi = 300)
+```
+
+
+#Figure 4a-b
+```{r rank abundance}
+#no. of taxa and read % plotted on the figures are calculated below the plots' code
+
+#ASV EBPR~Plant
+dn_EBPR <- amp_subset_samples(dn, Design == "EBPR")
+
+rank_EBPR <- amp_rankabundance(data = dn_EBPR,
+           group_by = "Plant",
+           tax_aggregate = "OTU",
+           plot_log = FALSE,
+           normalise = FALSE, 
+           detailed_output = FALSE)  +
+  theme(legend.title = element_blank(),
+        legend.position = c(.85, .5),
+        legend.text=element_text(size = 12),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 13, colour = "black"),  
+        axis.text.y = element_text(size = 13, color = "black"),
+        axis.title = element_text(size = 14)) +
+   geom_hline(yintercept = 80, linetype="dashed", color = "grey", size=1.0) +
+  scale_x_continuous(limits = c(0, 40000))
+
+rank_EBPR2 <- rank_EBPR + annotate("text", x=3000, y=20, label= "EBPR", fontface="bold", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=15, label= "Top 80% reads contains:", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=10, label= "491 genera (77.1% reads)", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=5, label= "945 species (66.8% reads)", size = 5, hjust = 0)
+
+ggsave(filename = paste0("Figure 4a.png"), plot = rank_EBPR2, width=13, height=14, units = "cm", dpi = 300, limitsize=FALSE)
+
+#ASV BNR~Plant
+dn_BNR <- amp_subset_samples(dn, Design == "BNR")
+
+rank_BNR <- amp_rankabundance(data = dn_BNR,
+           group_by = "Plant",
+           tax_aggregate = "OTU",
+           plot_log = FALSE,
+           normalise = FALSE, 
+           detailed_output = FALSE)  +
+  theme(legend.title = element_blank(),
+        legend.position = c(.85, .5),
+        legend.text=element_text(size = 12),
+        axis.text.x = element_text(angle = 0, hjust = 0.5, size = 13, colour = "black"),  
+        axis.text.y = element_text(size = 13, color = "black"),
+        axis.title = element_text(size = 14)) +
+   geom_hline(yintercept = 80, linetype="dashed", color = "grey", size=1.0) +
+  scale_x_continuous(limits = c(0, 40000))
+
+ rank_BNR2 <- rank_BNR + annotate("text", x=3000, y=20, label= "BNR", fontface="bold", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=15, label= "Top 80% reads contains:", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=10, label= "410 genera (76.4% reads)", size = 5, hjust = 0) +
+        annotate("text", x=3000, y=5, label= "720 species (64.7% reads)", size = 5, hjust = 0)
+
+ggsave(filename = paste0("Figure 4b.png"), plot = rank_BNR2, width=13, height=14, units = "cm", dpi = 300, limitsize=FALSE)
+
+#extract no of unique genera and species and read % for each Design group
+rank_ave <- amp_rankabundance(data = dn,
+           group_by = "Design",
+           tax_aggregate = "OTU",
+           plot_log = FALSE,
+           normalise = FALSE, 
+           detailed_output = FALSE)
+
+rd_ave <- rank_ave$data
+
+#subset the abundant (top 80%)
+rd_ave_80 <- rd_ave %>% filter(Cumsum < 80.01)
+
+#merge with taxonomy
+colnames(rd_ave_80)[1] <- "OTU"
+tax <- dn$tax
+rd80tax <- merge.data.frame(rd_ave_80, tax, "OTU", all.x = TRUE)
+
+#count the number of unique species and their read % (in top 80% of the data)
+rs80tax <- rd80tax %>% filter(Species != "")
+
+sp80 <- rs80tax %>%
+          group_by(Group) %>%
+          summarise(n_distinct(Species), sum(Mean))
+
+#count the number of unique genera and their read % (in top 80% of the data)
+rg80tax <- rd80tax %>% filter(Genus != "")
+
+gen80 <- rg80tax %>%
+          group_by(Group) %>%
+          summarise(n_distinct(Genus), sum(Mean))
+```
+
+#Figure 4c (data)
+```{r Venn diagram}
+#use data generated in Figure 4a-b chunk
+#Only data is generated here; the plot is made in external program.
+
+###genus
+rg80EBPR <- rg80tax %>% 
+            filter(Group == "EBPR")
+
+rg80BNR <- rg80tax %>% 
+            filter(Group == "BNR")
+
+rg_design <- merge.data.frame(rg80EBPR, rg80BNR, "Genus", all.x = TRUE, all.y = TRUE)
+
+#no of genera shared by EBPR and BNR
+Venn_g_shared <- rg_design %>%
+          filter(Group.x == "EBPR" & Group.y == "BNR" ) %>%
+          summarise(n_distinct(Genus))
+
+#no of genera and their read % unique in EBPR
+Venn_g_EBPR <- rg_design %>%
+          filter(Group.x == "EBPR" & is.na(Group.y)) %>%
+          summarise(n_distinct(Genus), sum(Mean.x))
+
+#no of genera and their read % unique in BNR
+Venn_g_BNR <- rg_design %>%
+          filter(is.na(Group.x) & Group.y == "BNR") %>%
+          summarise(n_distinct(Genus), sum(Mean.y))
+
+###species
+rs80EBPR <- rs80tax %>% 
+            filter(Group == "EBPR")
+
+rs80BNR <- rs80tax %>% 
+            filter(Group == "BNR")
+
+rs_design <- merge.data.frame(rs80EBPR, rs80BNR, "Species", all.x = TRUE, all.y = TRUE)
+
+#no of species shared by EBPR and BNR
+Venn_s_shared <- rs_design %>%
+          filter(Group.x == "EBPR" & Group.y == "BNR" ) %>%
+          summarise(n_distinct(Species))
+
+#no of species and their read % unique in EBPR
+Venn_s_EBPR <- rs_design %>%
+          filter(Group.x == "EBPR" & is.na(Group.y)) %>%
+          summarise(n_distinct(Species), sum(Mean.x))
+
+#no of species and their read % unique in BNR
+Venn_s_BNR <- rs_design %>%
+          filter(is.na(Group.x) & Group.y == "BNR") %>%
+          summarise(n_distinct(Species), sum(Mean.y))
+
+###ASV
+r80EBPR <- rd80tax %>% 
+            filter(Group == "EBPR")
+
+r80BNR <- rd80tax %>% 
+            filter(Group == "BNR")
+
+r_design <- merge.data.frame(r80EBPR, r80BNR, "OTU", all.x = TRUE, all.y = TRUE)
+
+#no of ASVs shared by EBPR and BNR
+Venn_ASV_shared <- r_design %>%
+          filter(Group.x == "EBPR" & Group.y == "BNR" ) %>%
+          summarise(n_distinct(OTU))
+
+#no of ASVs and their read % unique in EBPR
+Venn_ASV_EBPR <- r_design %>%
+          filter(Group.x == "EBPR" & is.na(Group.y)) %>%
+          summarise(n_distinct(OTU), sum(Mean.x))
+
+#no of genera and their read % unique in BNR
+Venn_ASV_BNR <- r_design %>%
+          filter(is.na(Group.x) & Group.y == "BNR") %>%
+          summarise(n_distinct(OTU), sum(Mean.y))
+```
+
+
+#core ASV function (for Figure 5 and S4)
+```{r core function}
+amp_core <- function(data,
+                     group_by, 
+                     core_pct = 80, 
+                     margin_plots = "xy",
+                     widths = c(5,1),
+                     heights = c(1,5)) {
+  require("ampvis2")
+  require("data.table")
+  require("patchwork")
+
+    #melt
+  d <- amp_export_long(
+    data,
+    metadata_vars = group_by,
+    tax_levels = "OTU")
+  
+  #group up and summarise
+  gg <- d[, .(sum = sum(count)), by = c("OTU", group_by)]
+  setorderv(gg, c(group_by, "sum"), order = -1)
+  gg[, OTUprop := sum / sum(sum) * 100, by = group_by]
+  gg[, cumOTUprop := cumsum(OTUprop), by = group_by]
+  gg[, core := fifelse(cumOTUprop < ..core_pct, TRUE, FALSE)]
+  gg[, nObs := sum(sum > 0), by = OTU]
+  gg[, nCore := sum(core), by = OTU]
+  gg[, totalReads := sum(sum)]
+  
+  gg_summary <- gg[
+    , 
+    .(nOTUs = uniqueN(OTU)),
+    by = .(nObs, nCore)]
+  
+  #generate plot
+    plot <- ggplot(
+    gg_summary,
+    aes(
+      x = as.factor(nObs), #factors to align correctly with margin plots
+      y = as.factor(nCore), #factors to align correctly with margin plots
+      color = nOTUs,
+      size = nOTUs
+    )
+  ) +
+    geom_point() +
+    #xlab(paste0("Observed in *n* ", group_by, "s")) +
+    xlab(paste0("Observed in n plants")) +
+    #ylab(paste0("Part of top ", core_pct, "% of all reads in N Plants")) +
+    ylab(paste0("Abundant in n plants")) +
+    scale_color_gradientn(colors = rev(RColorBrewer::brewer.pal(5, "YlOrRd")), trans = "log10") + 
+    theme_minimal() +
+    guides(size = guide_legend("nASVs"),
+          color = guide_colorbar("nASVs"))
+    
+#x margin plot  
+  if(any(tolower(margin_plots) %in% c("x", "xy", "yx"))) {
+    marginplot_x <- ggplot(
+      gg[
+        , 
+        .(nObsSum = sum(sum)/unique(totalReads)*100),
+        by = .(nObs)],
+      aes(as.factor(nObs), nObsSum)) +
+      geom_col() +
+      ylab("Cumulative ASV \nabundance (%)") +
+      theme_minimal() +
+      theme(
+        axis.title.y = element_text(size = 9),
+        axis.title.x = element_blank(),
+        axis.ticks.x = element_blank(),
+        axis.text.x = element_blank(),
+        panel.grid.minor.y = element_blank())
+  }
+#y margin plot  
+  if(any(tolower(margin_plots) %in% c("y", "xy", "yx"))) {
+    marginplot_y <- ggplot(
+      gg[
+        , 
+        .(nCoreSum = sum(sum)/unique(totalReads)*100),
+        by = .(nCore)],
+      aes(
+        x = as.factor(nCore),
+        y = nCoreSum
+      )) +
+      geom_col() +
+      ylab("Cumulative ASV \nabundance (%)") +
+      theme_minimal() +
+      theme(
+        axis.title.x = element_text(size = 9),
+        axis.title.y = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.y = element_blank(),
+        panel.grid.minor.x = element_blank()) +
+      coord_flip() 
+  }
+  
+  if(!any(tolower(margin_plots) %in% c("x", "y", "xy", "yx"))) {
+    layout <- NULL
+    p <- plot
+  } else if (tolower(margin_plots) == "x") {
+    layout <- NULL
+    p <- marginplot_x / plot + plot_layout(heights = heights)
+  } else if (tolower(margin_plots) == "y") {
+    layout <- NULL
+    p <- plot + marginplot_y + plot_layout(widths = widths)
+  } else if (any(tolower(margin_plots) %in% c("xy", "yx"))) {
+    layout <- "
+      A#
+      CD
+    "
+    p <- marginplot_x + 
+      plot + 
+      marginplot_y + 
+      plot_layout(widths = widths, heights = heights)
+  }
+  
+  p <- p + plot_layout(guides = "collect", design = layout)
+  
+  return(p)
+}
+
+```
+
+
+#Figure 5
+```{r EBPR core plot}
+core_EBPR <- amp_subset_samples(dn, Design == "EBPR")
+
+#plot 
+plot_core_EBPR <- amp_core(
+  core_EBPR,
+  group_by = "Plant",
+  core_pct = 80,
+  margin_plots = "xy",
+  widths = c(5,1),
+  heights = c(1,5)
+)
+
+ggsave(filename = paste0("C:/Users/LAB-PC/Desktop/MiDAS 3.1 paper/MiDAS 3.5_2/figures/midas3.5_core_EBPR_ASV_normalized2.png"), plot = plot_core_EBPR, width=20, height=13, units = "cm", dpi = 300, limitsize=FALSE)
+
+```
+
+###EBPR core data
+```{r EBPR core data}
+#define variables
+data <- core_EBPR
+group_by <- "Plant"
+core_pct = 80
+
+### extract the data from the plot
+#melt
+  d <- amp_export_long(
+    data,
+    metadata_vars = group_by,
+    tax_levels = "OTU")
+  
+  #group up and summarise
+  gg <- d[, .(sum = sum(count)), by = c("OTU", group_by)]
+  setorderv(gg, c(group_by, "sum"), order = -1)
+  #calculate proportion % abundance of each ASV
+  gg[, OTUprop := sum / sum(sum) * 100, by = group_by]
+  #calculate cumulative sum
+  gg[, cumOTUprop := cumsum(OTUprop), by = group_by]
+  #add TRUE/FALSE column with core (all < 80%)
+  gg[, core := fifelse(cumOTUprop < ..core_pct, TRUE, FALSE)]
+  #calculate how many times given ASV is observed in plants (>0)
+  gg[, nObs := sum(sum > 0), by = OTU]
+  #calculate how many times it is observed in core column (TRUE)
+  gg[, nCore := sum(core), by = OTU]
+  #add column with sum of all the reads
+  gg[, totalReads := sum(sum)]
+  
+  gg_summary <- gg[
+    , 
+    .(nOTUs = uniqueN(OTU)),
+    by = .(nObs, nCore)]
+
+#subset ASVs present & core in all EBPR plants
+ggs <- gg[(gg$nObs == 17 & gg$nCore == 17),]
+
+#core ASVs and their average abundance
+ggEBPR <- ggs %>%
+	group_by(OTU) %>%
+	summarise(mean_abu = mean(OTUprop)) %>%
+           arrange(desc(mean_abu))
+
+```
+
+
+#Figure 6
+```{r top 50 boxplot}
+box <- amp_boxplot(dn,
+            normalise = FALSE,
+            group_by = c("Design"),
+            tax_aggregate = "Species",
+            tax_add = c("Family","Genus"),
+            tax_show = 50
+            ) +
+  scale_y_log10(breaks = c(0.1, 1.0, 10))
+
+ggsave(filename = paste0("Figure 6.pdf"), plot = box, width = 9, height = 9, useDingbats=FALSE, limitsize=FALSE, dpi = 300)
+
+```
+
+
+#Figure 7
+```{r top 5 species PAO heatmap}
+#subset abundant PAO species
+PAO <- amp_subset_taxa(dn, tax_vector=c("s__Ca_Accumulibacter_phosphatis", "s__midas_s_315", "s__Ca_Accumulibacter_aalborgensis", "s__midas_s_3472", "s__midas_s_168", "s__midas_s_5", "s__midas_s_220", "s__midas_s_45", "s__midas_s_299", "s__midas_s_328", "s__midas_s_96", "s__midas_s_173",  "s__midas_s_2534", "s__midas_s_9060", "s__midas_s_1978"))
+
+#color PAO genera
+PAOcolor <- c("#581845", "#581845", "#581845", "#581845", "#581845", "black", "black", "black", "black", "black", "#300F7C", "#300F7C", "#300F7C", "#300F7C", "#300F7C")
+
+#plot
+ amp_heatmap(PAO,
+            group_by = c("Plant"),
+            tax_aggregate = "Species",
+            tax_add = c("Genus"),
+            measure = "mean",
+            tax_show = 100,
+            normalise = FALSE,
+            #round = 2,
+            plot_values_size = 4,
+            order_y_by = c("Dechloromonas; midas_s_1978", "Dechloromonas; midas_s_9060", "Dechloromonas; midas_s_2534", "Dechloromonas; midas_s_173", "Dechloromonas; midas_s_96", "Ca_Accumulibacter; midas_s_168", "Ca_Accumulibacter; midas_s_3472", "Ca_Accumulibacter; Ca_Accumulibacter_aalborgensis","Ca_Accumulibacter; midas_s_315", "Ca_Accumulibacter; Ca_Accumulibacter_phosphatis", "Tetrasphaera; midas_s_328", "Tetrasphaera; midas_s_299", "Tetrasphaera; midas_s_45", "Tetrasphaera; midas_s_220", "Tetrasphaera; midas_s_5"),
+            color_vector = c("#91bfdb","#ffffbf","#fc8d59")
+            ) +
+  theme(axis.text.x = element_text(angle = 45, size=11, vjust = 1),
+        axis.text.y = element_text(size=11, color = PAOcolor),
+        legend.position = "none")
+ 
+ggsave(filename = paste0("Figure 7.pdf"), width = 10, height = 5.5, dpi = 300)
+```
+
+
+
+#####Supplementary information#######
+#Figure S1
+```{r top 50 ASVs with MiDAS and SILVA classification}
+#heatmap with MiDAS and SILVA genus classifications
+#MiDAS
+midas_color <- c("black", "black", "black", "black", "black", 
+                 "black", "red", "black", "black", "black", 
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "red", "black",
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "black", "black",
+                 "black", "black", "black", "black", "black")
+
+s1a <- amp_heatmap(dn,
+            group_by = c("Plant"),
+            tax_aggregate = "OTU",
+            tax_add = c("Genus"),
+            tax_show = 50,
+            normalise = FALSE,
+            plot_values_size = 4.5
+            ) +
+  theme(axis.text.x = element_text(angle = 45, size=14, vjust = 1),
+        axis.text.y = element_text(size=15, color = midas_color),
+        legend.position = "none")
+ 
+ggsave(filename = paste0("Figure S1a.pdf"), plot = s1a, width = 12, height = 15, dpi = 300)
+
+#SILVA
+#remember to load SILVA sintax file -> go to "Load data" chunk
+
+silva_color <- c("black", "black", "red", "red", "black", 
+                 "red", "red", "red", "red", "black", 
+                 "red", "red", "red", "red", "black",
+                 "black", "black", "red", "red", "red",
+                 "black", "red", "red", "black", "black",
+                 "red", "black", "red", "black", "black",
+                 "red", "black", "black", "black", "black",
+                 "black", "red", "black", "black", "black",
+                 "red", "red", "red", "red", "black",
+                 "black", "red", "black", "black", "black")
+
+s1b <- amp_heatmap(dn,
+            group_by = c("Plant"),
+            tax_aggregate = "OTU",
+            tax_add = c("Genus"),
+            tax_show = 50,
+            normalise = FALSE,
+            plot_values_size = 4.5
+            ) +
+  theme(axis.text.x = element_text(angle = 45, size=14, vjust = 1),
+        axis.text.y = element_text(size=15, color = silva_color),
+        legend.position = "none")
+ 
+ggsave(filename = paste0("Figure S1b.pdf"), plot = s1b, width = 12, height = 15, dpi = 300)
+
+```
+
+
+#Figure S2
+```{r additional alpha diversity indices}
+#ASV richness
+ggplot(data = alfa, aes(x = Plant, y = ObservedOTUs, fill = Design)) +
+  geom_boxplot() +
+  xlab("") +
+  scale_y_continuous("Richness", limits = c(1000, 4000), breaks = c(1000, 2000, 3000, 4000)) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10, colour = "black", face = "bold"), 
+        axis.text.x = element_text(size = 10, colour = "black", vjust = 1, hjust = 1, angle = 45),
+        legend.title = element_blank()) 
+
+ggsave(filename = paste0("Figure S2a.png"), width = 8, height = 4, dpi = 300)
+
+#invSimpson
+ggplot(data = alfa, aes(x = Plant, y = c(invSimpson), fill = Design)) +
+  geom_boxplot() +
+  xlab("") +
+  scale_y_continuous("Inverse Simpson", limits = c(0,500), breaks = c(0, 100, 200, 300, 400)) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10, colour = "black", face = "bold"), 
+        axis.text.x = element_text(size = 10, colour = "black", vjust = 1, hjust = 1, angle = 45),
+        legend.title = element_blank()) +
+  
+ggsave(filename = paste0("Figure S2b.png"), width = 8, height = 4, dpi = 300)
+
+#Shannon
+ggplot(data = alfa, aes(x = Plant, y = c(Shannon), fill = Design)) +
+  geom_boxplot() +
+  xlab("") +
+  scale_y_continuous("Shannon-Weaver index", limits = c(3, 8), breaks = c(4, 6, 8)) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 10, colour = "black", face = "bold"), 
+        axis.text.x = element_text(size = 10, colour = "black", vjust = 1, hjust = 1, angle = 45),
+        legend.title = element_blank())
+
+ggsave(filename = paste0("Figure S2c.png"), width = 8, height = 4, dpi = 300)
+
+```
+
+
+#Figure S3
+```{r heatmap Aalborg W}
+AAW <- amp_subset_samples(dn, Plant == "Aalborg W")
+
+#species
+amp_heatmap(AAW,
+            group_by = c("Plant", "Date"),
+            tax_aggregate = "Species",
+            tax_add = c("Genus"),
+            tax_show = 50,
+            normalise = FALSE,
+            #round = 2,
+            plot_values_size = 4
+            ) +
+  theme(axis.text.x = element_text(angle = 45, size=13, vjust = 1),
+        axis.text.y = element_text(size=13, color = "black"),
+        legend.position = "none")
+ 
+ggsave(filename = paste0("Figure S3.pdf"), width = 20, height = 15, dpi = 300)
+
+```
+
+
+#Figure S4a
+```{r PCoA weighed UniFrac}
+#load weighed UniFrac distance matrix
+unifrac_w <- read.delim(file = "weighted_unifrac_otutable_13500.txt", check.names = FALSE, header = T, stringsAsFactors = F, row.names = 1)
+
+#metadata has more samples than the UniFrac matrix, only keep those in unifrac
+metadata_w <- metadata[which(metadata[,1] %in% rownames(unifrac_w)),]
+
+#load dataset
+d_unifrac_w <- amp_load(usearch_otutable, metadata_w)
+
+#overwrite abundance data with distance matrix
+d_unifrac_w$abund <- unifrac_w
+
+#data$abund must be of class "dist" if distmeasure = "none" when performing PCoA. 
+d_unifrac_w$abund <- as.dist(unifrac_w)
+
+#plot
+beta_PCoA_w_uni <- amp_ordinate(d_unifrac_w,
+             type = "PCoA",
+             sample_color_by = "Plant",
+             sample_point_size = 4,
+             filter_species = 0,
+             transform = "none",
+             distmeasure = "none",
+             sample_colorframe = TRUE,
+             sample_colorframe_label = "Plant"
+ )
+
+ggsave(filename = paste0("Figure S4a.png"), plot = beta_PCoA_w_uni, width = 6, height = 5, dpi = 300)
+```
+
+# Figure S4b
+```{r weighed UniFrac distance plot}
+#convert UniFrac distance matrix to data frame
+dw <- melt(as.matrix(unifrac_w), varnames = c("Plant1", "Plant2"))
+dw$Plant1 <- as.character(dw$Plant1)
+dw$Plant2 <- as.character(dw$Plant2)
+
+#bind Plant names to Sample names
+dw2 <- metadata_un[,c("Sample", "Plant")]
+dwb <- merge.data.frame(dw, dw2, by.x ="Plant1", by.y = "Sample", all.x = TRUE)
+dwm <- merge.data.frame(dwb, dw2, by.x ="Plant2", by.y = "Sample", all.x = TRUE)
+
+#subset rows with distances for the same plants
+dwm2 <- dwm[(dwm$Plant.x == dwm$Plant.y),]
+dwm2 <- dwm2[(dwm2$value != 0),]
+dwm2[,"type"] <- "within WWTP"
+
+#subset rows with distances measured between the plants
+dwm3 <- dwm[(dwm$Plant.x != dwm$Plant.y),]
+dwm3[,"type"] <- "between WWTPs"
+
+unifrac_w_sorted <- rbind(dwm2, dwm3)
+unifrac_w_sorted$type <- factor(unifrac_w_sorted$type,
+    levels = c('within WWTP','between WWTPs'), ordered = TRUE)
+
+#plot
+p2 <- ggplot(unifrac_w_sorted, aes(x=Plant.y, y=value, fill = type)) + 
+  geom_boxplot(outlier.size = 0.3) +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 9, colour = "grey30", face = "plain"),
+        axis.text.x = element_text(size = 9, colour = "grey30", vjust = 1, hjust = 1, angle = 45),
+        legend.position = "top", legend.title = element_blank()) +
+  xlab("") + 
+  ylab("UniFrac distance") +
+  scale_fill_manual( values = c("#F8766D", "#00BFC4"))
+
+ggsave(filename = paste0("Figure S4b.png"), plot = p2, width = 5, height = 3.5, dpi = 300)
+
+```
+
+#Figure S4c
+```{r weighed UniFrac p-value matrix}
+#Dunn's test
+dunn_w <- as.data.frame(dunn.test(x= dwm3[,"value"], g=dwm3[,"Plant.x"],  method = 'bonferroni', altp = TRUE))
+
+setDT(dunn_w)[, paste0("Plant", 1:2) := tstrsplit(comparisons, " - ")]
+
+#add p value column with 2 digits notation
+dunn_w[,'altP.adjusted2']=round(dunn_w[,'altP.adjusted'],2)
+
+d_w_plot <- ggplot(data = dunn_w, aes(x=Plant1, y=Plant2, fill=altP.adjusted)) + 
+  geom_tile(color = "grey") +
+  scale_fill_gradient2(low = "red", high = "#fc8d59", mid = "#333ede", 
+   midpoint = 0, limit = c(0,0.05), space = "Lab", na.value = "grey", 
+   name="Dunn's \np value", breaks = c(0, 0.01, 0.05)) +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust = 1),
+       legend.title = element_text(size = 9)) +
+ coord_fixed() +
+  xlab("") +
+  ylab("") +
+  geom_text(aes(Plant2, Plant1, label = altP.adjusted2), color = "black", size = 2.3) 
+
+ggsave(filename = paste0("Figure S4c.png"),  plot = d_w_plot, width = 5.5, height = 5.5, dpi = 300)
+```
+
+#Figure S5
+```{r BNR core plot}
+core_BNR <- amp_subset_samples(dn, Design == "BNR")
+
+plot_core_BNR <- amp_core(
+  core_BNR,
+  group_by = "Plant",
+  core_pct = 80,
+  margin_plots = "xy",
+  widths = c(5,1),
+  heights = c(1,5)
+)
+
+ggsave(filename = paste0("Figure S5.png"), plot = plot_core_BNR, width=15, height=11, units = "cm", dpi = 300, limitsize=FALSE)
+```
+
+
+###BNR core data
+```{r BNR core data}
+#define variables
+data <- core_BNR
+group_by <- "Plant"
+core_pct = 80
+
+### extract the data from the plot
+#melt
+  d <- amp_export_long(
+    data,
+    metadata_vars = group_by,
+    tax_levels = "OTU")
+  
+  #group up and summarise
+  gg <- d[, .(sum = sum(count)), by = c("OTU", group_by)]
+  setorderv(gg, c(group_by, "sum"), order = -1)
+  #calculate proportion % abundance of each OTU
+  gg[, OTUprop := sum / sum(sum) * 100, by = group_by]
+  #calculate cumulative sum
+  gg[, cumOTUprop := cumsum(OTUprop), by = group_by]
+  #add TRUE/FALSE column with core (all < 80%)
+  gg[, core := fifelse(cumOTUprop < ..core_pct, TRUE, FALSE)]
+  #calculate how many times given ASV is observed in plants (>0)
+  gg[, nObs := sum(sum > 0), by = OTU]
+  #calculate how many times it is observed in core column (TRUE)
+  gg[, nCore := sum(core), by = OTU]
+  #cadd column with sum of all the reads
+  gg[, totalReads := sum(sum)]
+  
+  gg_summary <- gg[
+    , 
+    .(nOTUs = uniqueN(OTU)),
+    by = .(nObs, nCore)]
+
+#subset ASVs present & core in all BNR plants
+ggs <- gg[(gg$nObs == 4 & gg$nCore == 4),]
+
+#summarize for all plants
+ggBNR <- ggs %>%
+	group_by(OTU) %>%
+	summarise(mean_abu = mean(OTUprop)) %>%
+           arrange(desc(mean_abu))
+
+```
+
+
+#Figure S6
+```{r core heatmap}
+#uses data generated in Figure 5 and S4
+ggEBPR[,"design"] <- "EBPR"
+ggBNR[,"design"] <- "BNR"
+
+ht_core <- rbind(ggEBPR, ggBNR)
+
+#bind with tax info
+ht_core <- merge.data.frame(ht_core, dn$tax, "OTU", all.x = TRUE)
+
+ht_core_g <- ht_core %>%
+  group_by(design, Genus) %>%
+	summarise(mean_abu_g = mean(mean_abu))%>%
+           arrange(desc(mean_abu_g))
+
+ht_core_g$Genus <- gsub("g__","",ht_core_g$Genus)
+
+#calculate the average abundance in BNR and EBPR (used to order the heatmap)
+core_g_ave_list <- ht_core_g %>%
+                    group_by(Genus) %>%
+                  	summarise(mean_order = mean(mean_abu_g))%>%
+                             arrange(desc(mean_order))
+
+core_g_ave_list$Genus <- with(core_g_ave_list, factor(Genus, levels = rev(sort(unique(Genus)))))
+
+#genus level plot  
+p <- ggplot(ht_core_g, aes(x = reorder(Genus, mean_abu_g, FUN = mean), 
+                           y = factor(design, levels = rev(levels(factor(design))))
+                           )) +
+                      geom_tile(aes(fill = mean_abu_g), na.rm = FALSE) +
+                      geom_text(aes(label = round(mean_abu_g, 1)), size=2) +
+                      coord_flip() +
+                      scale_fill_gradient2(low = "#91bfdb", high = "#fc8d59", mid = "#ffffbf", midpoint = 1, space = "Lab", na.value = "grey", name="% read \nabundance", breaks = c(0,0.1,1,2)) 
+
+pp <- p + theme_minimal() + 
+    labs(x = "", y = "") + 
+    scale_x_discrete(expand = c(0, 0)) +
+    scale_y_discrete(expand = c(0, 0)) + 
+    theme(legend.position = "right", 
+          axis.ticks = element_line(colour = "black"), 
+         axis.text.x = element_text(size = 10, angle = 45, vjust = 1, hjust = 1, colour = "black"))
+
+ggsave(filename = paste0("Figure S6.pdf"), plot = pp, width=9.3, height=40, units = "cm", dpi = 300, limitsize=FALSE)
+
+```
+
+###number of core taxa at genus, species and ASV level in EBPR and BNR
+```{r core_taxa numbers}
+
+core <- merge.data.frame(ggEBPR, ggBNR, "OTU", all.x = TRUE, all.y = TRUE)
+core_tax <- merge.data.frame(core, dn$tax, "OTU", all.x = TRUE)
+
+core_g_shared <- core_tax %>%
+          filter(design.x == "EBPR" & design.y == "BNR" ) %>%
+          summarise(n_distinct(Genus))
+
+#core ASVs
+core_ASV_EBPR <- core_tax %>%
+          filter(design.x == "EBPR") %>%
+          summarise(n_distinct(OTU), sum(mean_abu.x))
+
+core_ASV_BNR <- core_tax %>%
+          filter(design.y == "BNR") %>%
+          summarise(n_distinct(OTU), sum(mean_abu.y))
+
+#core genera
+core_g_EBPR <- core_tax %>%
+          filter(design.x == "EBPR") %>%
+          summarise(n_distinct(Genus), sum(mean_abu.x))
+
+core_g_BNR <- core_tax %>%
+          filter(design.y == "BNR") %>%
+          summarise(n_distinct(Genus), sum(mean_abu.y))
+
+#core species
+core_s_EBPR <- core_tax %>%
+          filter(design.x == "EBPR") %>%
+          summarise(n_distinct(Species), sum(mean_abu.x))
+
+core_s_BNR <- core_tax %>%
+          filter(design.y == "BNR") %>%
+          summarise(n_distinct(Species), sum(mean_abu.y))
+
+```
+
+
+#Figure S7
+```{r top 100 boxplot}
+box100 <- amp_boxplot(dn,
+            normalise = FALSE,
+            group_by = c("Design"),
+            tax_aggregate = "Species",
+            tax_add = c("Family", "Genus"),
+            tax_show = 100,
+            plot_log = TRUE
+            ) +
+  scale_y_log10(breaks = c(0.1, 1.0, 10))
+
+ggsave(filename="Figure S7.pdf", width = 10, height = 15, useDingbats=FALSE, limitsize=FALSE, dpi = 300)
+
+```
